@@ -8,31 +8,32 @@ import librosa.display
 import tensorflow as tf
 from sklearn.preprocessing import LabelEncoder
 from tensorflow.keras.utils import to_categorical
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score, classification_report
 import seaborn as sns
 import matplotlib.pyplot as plt
 from tensorflow.keras.optimizers.legacy import Adam
 import noisereduce as nr
 
 # Paths for test data
-test_folder_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicemug/'
-test_wav_folder = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicemug_wav/'
-test_mfcc_image_folder = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicemug_mfcc_images/'
-test_mel_image_folder = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicemug_mel_images/'
+test_folder_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicetest3/'
+test_wav_folder = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicetest3_wav/'
+test_mel_image_folder = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/juicetest3_mel_images/'
 # 設定儲存路徑
-accuracy_save_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/mugaccuracy/accuracy_mel_cnn_mug_42.txt'
-confusion_matrix_save_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/mugconfusionmatrix/confusion_matrix_mel_cnn_mug_42.png'
+accuracy_save_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/new5_14/accuracy_mel_rnn_model62_juicetest3.txt'
+confusion_matrix_save_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/new5_14/confusion_matrix_mel_rnn_model62_juicetest3.png'
+# 定義分類報告儲存路徑
+classification_report_path = '/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/new5_14/classification_report_mel_rnn_model62_juicetest3.txt'
 
 # 確保目標資料夾存在
 os.makedirs(os.path.dirname(accuracy_save_path), exist_ok=True)
 os.makedirs(os.path.dirname(confusion_matrix_save_path), exist_ok=True)
 # Ensure necessary folders exist
 os.makedirs(test_wav_folder, exist_ok=True)
-os.makedirs(test_mfcc_image_folder, exist_ok=True)
 os.makedirs(test_mel_image_folder, exist_ok=True)
+os.makedirs(os.path.dirname(classification_report_path), exist_ok=True)
 
 # Load the best model
-final_model_path = 'finaltrain_mel_cnn_water_model42.keras'
+final_model_path = 'finaltrain_mel_rnn_model62.keras'
 # best_model = tf.keras.models.load_model(final_model_path, custom_objects={'Adam': Adam})
 best_model = tf.keras.models.load_model(final_model_path, compile=False)
 best_model.compile(optimizer=tf.keras.optimizers.Adam(),
@@ -53,25 +54,59 @@ print(f"Test Loss: {test_loss:.4f}")
 print(f"Test Accuracy: {test_acc:.4f}")
 
 # Step 6: Confusion Matrix for Test Data
+#{"watermug": 0, "applemug": 1, "teamug": 2}
 y_pred = best_model.predict(test_features)
 y_pred_labels = np.argmax(y_pred, axis=1)
 y_true_labels = np.argmax(categorical_test_labels, axis=1)
 
-cm_test = confusion_matrix(y_true_labels, y_pred_labels)
-print(f"Confusion Matrix for Test Data:\n{cm_test}")
+# 定義縮寫對應表
+short_label_map = {"watertest3": "w", "appletest3": "a", "teatest3": "t"}
+#abbr_to_full = {"w": "watermug", "a": "applemug", "t": "teamug"}
 
+# 簡化標籤
+class_names_abbr = [short_label_map[label] for label in encoder.classes_]
+y_true_abbr = [short_label_map[encoder.classes_[i]] for i in y_true_labels]
+y_pred_abbr = [short_label_map[encoder.classes_[i]] for i in y_pred_labels]
+
+# 重新計算混淆矩陣（使用縮寫）
+cm_abbr = confusion_matrix(y_true_abbr, y_pred_abbr, labels=class_names_abbr)
+
+# 畫出改良後的混淆矩陣
 plt.figure(figsize=(8, 6))
-sns.heatmap(cm_test,
+sns.heatmap(cm_abbr,
             annot=True,
             fmt='d',
             cmap='Blues',
-            xticklabels=encoder.classes_,
-            yticklabels=encoder.classes_)
+            xticklabels=class_names_abbr,
+            yticklabels=class_names_abbr)
+
 plt.xlabel('Predicted Label')
 plt.ylabel('True Label')
-plt.title('Confusion Matrix for Test Data')
+plt.title('Confusion Matrix (w: water, a: apple, t: tea)')
+
+# ✅ 在圖下方加入完整說明
+label_description = "w: watertest3   |   a: appletest3   |   t: teatest3"
+plt.figtext(0.5, -0.05, label_description, wrap=True, horizontalalignment='center', fontsize=10)
+
+# 儲存與顯示圖表
+plt.tight_layout()
 plt.savefig(confusion_matrix_save_path)
 plt.show()
 plt.close()
 print(f"Confusion matrix saved to {confusion_matrix_save_path}")
 
+
+# 取得分類報告（字串形式）
+report_str = classification_report(y_true_abbr, y_pred_abbr, labels=class_names_abbr, digits=4)
+
+# 印出到終端
+print("Classification Report (Abbreviated Labels):")
+print(report_str)
+
+# 寫入到檔案
+with open(classification_report_path, 'w') as f:
+    f.write("Classification Report (Abbreviated Labels)\n")
+    f.write("Label Mapping: w = watertest3, a = appletest3, t = teatest3\n\n")
+    f.write(report_str)
+
+print(f"Classification report saved to {classification_report_path}")
