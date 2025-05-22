@@ -1,0 +1,310 @@
+## 
+import os
+import librosa
+from transformers import AutoFeatureExtractor, AutoModelForAudioClassification, TrainingArguments, Trainer
+from torch.utils.data import Dataset
+import torch
+from pydub import AudioSegment
+from sklearn.model_selection import KFold
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, f1_score
+import pandas as pd
+import numpy as np
+import shutil
+import seaborn as sns
+import matplotlib.pyplot as plt
+from transformers import EarlyStoppingCallback
+from transformers import TrainerCallback
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+print(torch.backends.mps.is_available())  # True 表示支援
+print(f"Using device: {torch.device('mps' if torch.backends.mps.is_available() else 'cpu')}")
+
+# ========== 登入 Hugging Face ==========
+from huggingface_hub import login
+login(token="")
+
+# ========== 資料夾與標籤設定 ==========
+label_mapping = {"watertrain": 0, "appletrain": 1, "coldtea": 2}
+short_label_map = {
+    "watertrain": "w",
+    "appletrain": "a",
+    "coldtea": "t"
+}
+mp3_root = "/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/train1/"
+wav_root = "/Users/leechienju/Library/Mobile Documents/com~apple~CloudDocs/Documents/juice/train1wav/"
+os.makedirs(wav_root, exist_ok=True)
+# MP3 轉換成 WAV
+# MP3 轉換成 WAV，僅保留 5~10 秒區段
+for folder in os.listdir(mp3_root):
+    src_folder = os.path.join(mp3_root, folder)
+    if not os.path.isdir(src_folder):
+        continue  # 跳過非資料夾項目（例如 .DS_Store）
+    dst_folder = os.path.join(wav_root, folder)
+    os.makedirs(dst_folder, exist_ok=True)
+    
+    for file in os.listdir(src_folder):
+        if file.endswith(".mp3"):
+            mp3_path = os.path.join(src_folder, file)
+            wav_path = os.path.join(dst_folder, file.replace(".mp3", ".wav"))
+            try:
+                sound = AudioSegment.from_mp3(mp3_path)
+                start_ms = 5 * 1000  # 5 秒
+                end_ms = 10 * 1000   # 10 秒
+                if len(sound) >= end_ms:
+                    sound = sound[start_ms:end_ms]
+                    sound.export(wav_path, format="wav")
+                else:
+                    print(f"⚠️ 音檔太短，已略過：{mp3_path}")
+            except Exception as e:
+                print(f"❌ Failed to convert {mp3_path}: {e}")
+
+
+folder_path = wav_root
+
+# ========== 載入 AST 特徵擷取器與模型 ==========
+feature_extractor = AutoFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
+model_ast = AutoModelForAudioClassification.from_pretrained(
+    "MIT/ast-finetuned-audioset-10-10-0.4593",
+    num_labels=len(label_mapping),
+    ignore_mismatched_sizes=True
+)
+
+# ========== 音檔轉 AST 輸入 ==========
+def extract_input_tensor(file_path):
+    try:
+        audio, sr = librosa.load(file_path, sr=16000)  # AST 模型需要 16kHz 音檔
+        inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
+        return inputs['input_values'][0]
+    except Exception as e:
+        print(f"❌ 無法讀取 {file_path}：{e}")
+        return None
+
+# ========== 收集資料 ==========
+wav_files = []
+labels = []
+
+for label_name, label_id in label_mapping.items():
+    label_dir = os.path.join(folder_path, label_name)
+    if not os.path.exists(label_dir):
+        print(f"❗ 資料夾不存在: {label_dir}")
+        continue
+
+    for fname in os.listdir(label_dir):
+        if fname.endswith(".mp3") or fname.endswith(".wav"):
+            fpath = os.path.join(label_dir, fname)
+            wav_files.append(fpath)
+            labels.append(label_id)
+
+# 過濾掉讀取失敗的檔案
+X_list = []
+labels_clean = []
+for f, l in zip(wav_files, labels):
+    tensor = extract_input_tensor(f)
+    if tensor is not None:
+        X_list.append(tensor)  # shape (num_files, seq_len)
+        labels_clean.append(l)
+
+X_tensor = torch.stack(X_list)  # PyTorch tensor
+y_tensor = torch.tensor(labels_clean)
+
+class AudioDataset(Dataset):
+    def __init__(self, X_tensor, y_tensor):
+        self.X = X_tensor
+        self.y = y_tensor
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return {
+            "input_values": self.X[idx],
+            "labels": self.y[idx]
+        }
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = logits.argmax(axis=-1)
+    acc = accuracy_score(labels, predictions)
+    return {"accuracy": acc, "eval_loss": np.mean((predictions - labels) ** 2)}
+
+class ReduceLROnPlateauCallback(TrainerCallback):
+    def __init__(self, optimizer, mode='min', factor=0.5, patience=1, verbose=True):
+        self.scheduler = ReduceLROnPlateau(optimizer, mode=mode, factor=factor, patience=patience, verbose=verbose)
+        self.metric_name = "eval_loss"  # 可以改成你要 monitor 的 metric
+    
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics is None or self.metric_name not in metrics:
+            print(f"[Callback] {self.metric_name} not found in metrics. Skipping ReduceLROnPlateau step.")
+            return
+        current = metrics[self.metric_name]
+        print(f"[Callback] ReduceLROnPlateau step with {self.metric_name} = {current}")
+        self.scheduler.step(current)
+
+# 儲存分類報告與準確率
+accuracy_list = []
+report_list = []
+precision_macro_list = []
+recall_macro_list = []
+f1_macro_list = []
+f1_weighted_list = []
+all_preds = []
+all_labels = []
+
+best_accuracy = 0
+best_model_path = "./best_ast_model_5fold62_5_22"
+save_base_dir = "/Users/leechienju/new5_22/62"
+os.makedirs(save_base_dir, exist_ok=True)
+
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_tensor)):
+    print(f"\n📦 Fold {fold+1}/5")
+    X_train_tensor = X_tensor[train_idx]
+    X_val_tensor = X_tensor[val_idx]
+    y_train_tensor = y_tensor[train_idx]
+    y_val_tensor = y_tensor[val_idx]
+
+    train_dataset = AudioDataset(X_train_tensor, y_train_tensor)
+    val_dataset = AudioDataset(X_val_tensor, y_val_tensor)
+
+    # 複製新模型（每次都重新載入模型）
+    model_fold = AutoModelForAudioClassification.from_pretrained(
+        "MIT/ast-finetuned-audioset-10-10-0.4593",
+        num_labels=len(label_mapping),
+        ignore_mismatched_sizes=True
+    )
+
+    optimizer = torch.optim.AdamW(model_fold.parameters(), lr=2e-5)
+    lr_scheduler_cb = ReduceLROnPlateauCallback(optimizer)
+
+    training_args = TrainingArguments(
+        #output_dir=os.path.join(save_base_dir, f"fold{fold+1}_results"),
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        logging_strategy="epoch",
+        learning_rate=3e-5,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=8,
+        num_train_epochs=10,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        no_cuda=True,
+        #logging_dir=os.path.join(save_base_dir, f"fold{fold+1}_logs"),
+        save_total_limit=1
+    )
+    
+    trainer = Trainer(
+        model=model_fold,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        optimizers=(optimizer, None),
+        callbacks=[
+            lr_scheduler_cb,  # 你自定義的 Learning Rate 調整 callback
+            EarlyStoppingCallback(early_stopping_patience=3)  # 如果連續3個epoch沒有進步就早停
+        ],
+    )
+
+    trainer.train()
+     # 訓練後評估
+    preds = trainer.predict(val_dataset)
+    pred_labels = np.argmax(preds.predictions, axis=1)
+    acc = accuracy_score(y_val_tensor, pred_labels)
+    accuracy_list.append(acc)
+
+    all_preds.extend(pred_labels)
+    all_labels.extend(y_val_tensor.numpy())
+
+    # ➤ 計算並儲存 F1-score
+    f1_macro = f1_score(y_val_tensor, pred_labels, average='macro')
+    f1_weighted = f1_score(y_val_tensor, pred_labels, average='weighted')
+    f1_macro_list.append(f1_macro)
+    f1_weighted_list.append(f1_weighted)
+
+    print("Current LR:", trainer.optimizer.param_groups[0]['lr'])
+    
+    # ➤ 分類報告
+    report = classification_report(y_val_tensor, pred_labels, target_names=label_mapping.keys(), output_dict=True)
+    precision_macro = report['macro avg']['precision']
+    recall_macro = report['macro avg']['recall']
+    precision_macro_list.append(precision_macro)
+    recall_macro_list.append(recall_macro)
+    report_df = pd.DataFrame(report).transpose()
+    report_path = os.path.join(save_base_dir, f"fold{fold+1}_report.csv")
+    report_df.to_csv(report_path)
+    print(f"📄 分類報告儲存於：{report_path}")
+
+
+    # ➤ 混淆矩陣
+    cm = confusion_matrix(y_val_tensor, pred_labels)
+    plt.figure(figsize=(8, 6))
+    short_labels = [short_label_map[k] for k in label_mapping.keys()]
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=short_labels,
+                yticklabels=short_labels)
+
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title(f'Confusion Matrix Fold {fold+1}')
+    cm_path = os.path.join(save_base_dir, f"fold{fold+1}_confusion_matrix.png")
+    plt.savefig(cm_path)
+    plt.close()
+    print(f"📊 混淆矩陣儲存於：{cm_path}")
+
+    # 儲存最佳模型
+    if acc > best_accuracy:
+        best_accuracy = acc
+        trainer.save_model(best_model_path)
+        feature_extractor.save_pretrained(best_model_path)
+        print(f"🏆 最佳模型儲存於：{best_model_path}")
+        
+
+# 儲存平均準確率
+avg_acc = np.mean(accuracy_list)
+with open(os.path.join(save_base_dir, "accuracy_mel_ast_5fold42_glass.txt"), "w") as f:
+    f.write(f"每折準確率：{accuracy_list}\n")
+    f.write(f"五折平均準確率：{avg_acc:.4f}\n")
+
+
+# 繪製平均混淆矩陣
+from sklearn.metrics import ConfusionMatrixDisplay
+
+avg_cm = confusion_matrix(all_labels, all_preds)
+short_labels = [short_label_map[k] for k in label_mapping.keys()]
+disp = ConfusionMatrixDisplay(confusion_matrix=avg_cm, display_labels=short_labels)
+#disp = ConfusionMatrixDisplay(confusion_matrix=avg_cm, display_labels=label_mapping.keys())
+disp.plot(cmap='Blues', xticks_rotation=45)
+plt.title("Average Confusion Matrix")
+plt.tight_layout()
+plt.savefig(os.path.join(save_base_dir, "avg_confusion_matrix.png"))
+plt.close()
+
+avg_cm = confusion_matrix(all_labels, all_preds)
+plt.figure(figsize=(8, 6))
+short_labels = [short_label_map[k] for k in label_mapping.keys()]
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=short_labels,
+            yticklabels=short_labels)
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title("Average Confusion Matrix (5-Fold)")
+avg_cm_path = os.path.join(save_base_dir, "average_confusion_matrix.png")
+plt.savefig(avg_cm_path)
+plt.close()
+print(f"📊 平均混淆矩陣儲存於：{avg_cm_path}")
+
+with open(os.path.join(save_base_dir, "metrics_summary.txt"), "w") as f:
+    f.write(f"每折準確率：{accuracy_list}\n")
+    f.write(f"平均準確率：{np.mean(accuracy_list):.4f}\n")
+    f.write(f"每折 macro precision：{precision_macro_list}\n")
+    f.write(f"平均 macro precision：{np.mean(precision_macro_list):.4f}\n")
+    f.write(f"每折 macro recall：{recall_macro_list}\n")
+    f.write(f"平均 macro recall：{np.mean(recall_macro_list):.4f}\n")
+    f.write(f"每折 macro F1：{f1_macro_list}\n")
+    f.write(f"平均 macro F1：{np.mean(f1_macro_list):.4f}\n")
+    f.write(f"每折 weighted F1：{f1_weighted_list}\n")
+    f.write(f"平均 weighted F1：{np.mean(f1_weighted_list):.4f}\n")
+
+print(f"\n✅ 五折驗證完成，平均準確率：{avg_acc:.4f}")
+print(f"✅ 最佳模型已儲存至：{best_model_path}")
