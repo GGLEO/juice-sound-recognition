@@ -196,8 +196,5 @@ plt.title('Average Confusion Matrix')
 plt.savefig(os.path.join(results_folder, 'confusion_matrices', 'average_confusion_matrix.png'))
 plt.close()
 
-# 繪製平均 ROC 曲線
-# 注意：這裡僅為示意，實際計算平均 ROC 曲線需對齊所有折的 fpr
-# 並在相同的 fpr 上插值 tpr，然後計算平均 tpr
 best_model.save(best_model_path)
 print(f"Best model from fold {best_fold} saved to {best_model_path}")
