@@ -104,18 +104,46 @@ def evaluate_folder(folder_path, accuracy_save_path, confusion_matrix_save_path)
         f.write(f"Accuracy: {acc * 100:.2f}%\n")
         f.write(f"Average Loss: {avg_loss:.4f}\n\n")
     
-    # ➤ 混淆矩陣
-    cm = confusion_matrix(y_true, y_pred, labels=label_names)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_names)
-    disp.plot(cmap='Blues', xticks_rotation=45)
-    plt.title("Confusion Matrix")
-    plt.tight_layout()
+    
+    # 短標籤對應表
+    short_label_map = {
+        "watertrain": "w",
+        "appletrain": "a",
+        "coldtea": "t"
+    }
+    
+    # 建立 short_label 對應的混淆矩陣
+    short_y_true = [short_label_map[label] for label in y_true]
+    short_y_pred = [short_label_map[label] for label in y_pred]
+    short_labels = ['w', 'a', 't']
+    
+    # ➤ 混淆矩陣顯示
+    cm = confusion_matrix(short_y_true, short_y_pred, labels=short_labels)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=short_labels)
+    #fig, ax = plt.subplots(figsize=(6, 6))
+    #disp.plot(cmap='Blues', ax=ax, xticks_rotation=0)
+    disp.plot(cmap='Blues', xticks_rotation=0)
+    
+    # ➤ 圖標題與標籤說明
+    #plt.title("Confusion Matrix (w: water, a: apple, t: tea)", fontsize=16)
+    plt.xlabel("Identified Label", fontsize=14)
+    plt.ylabel("True Label", fontsize=14)
+    
+    # ✅ 調整刻度字體大小
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+    
+    # ✅ 在圖下方加入完整說明
+    label_description = "w: water   |   a: apple   |   t: tea"
+    plt.figtext(0.5, -0.05, label_description, wrap=True, horizontalalignment='center', fontsize=10)
 
-    # ➤ 儲存混淆矩陣圖片
-    plt.savefig(confusion_matrix_save_path)
+    plt.tight_layout()
+    
+    # ➤ 儲存圖
+    plt.savefig(confusion_matrix_save_path, dpi=300)
     plt.show()
     plt.close()
-
+    
     # ➤ 儲存 CSV 分類報告
     report_dict = classification_report(y_true, y_pred, labels=label_names, output_dict=True)
     df_report = pd.DataFrame(report_dict).transpose()
