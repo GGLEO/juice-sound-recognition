@@ -71,17 +71,28 @@ y_pred_abbr = [short_label_map[encoder.classes_[i]] for i in y_pred_labels]
 cm_abbr = confusion_matrix(y_true_abbr, y_pred_abbr, labels=class_names_abbr)
 
 # 畫出改良後的混淆矩陣
-plt.figure(figsize=(8, 6))
+plt.figure(figsize=(8, 6), dpi=300)  # 更高解析度
+
+# 建議在圖示後加 layout
+plt.tight_layout()
+
 sns.heatmap(cm_abbr,
             annot=True,
             fmt='d',
             cmap='Blues',
             xticklabels=class_names_abbr,
-            yticklabels=class_names_abbr)
+            yticklabels=class_names_abbr,
+            #linewidths=1,       # 加粗邊框線
+            linecolor='black'   # 設定邊框顏色
+           )
 
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.title('Confusion Matrix (w: water, a: apple, t: tea)')
+plt.xlabel('Identified Label', fontsize=14)
+plt.ylabel('True Label', fontsize=14)
+#plt.title('Confusion Matrix (w: water, a: apple, t: tea)', fontsize=16)
+
+# ✅ 調整刻度字體大小
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
 
 # ✅ 在圖下方加入完整說明
 label_description = "w: watertest3   |   a: appletest3   |   t: teatest3"
